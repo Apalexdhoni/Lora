@@ -1,0 +1,114 @@
+import time
+import os
+import socket
+import pygame
+import json
+from datetime import datetime
+
+# Constants for Wi-Fi
+WIFI_SERVER_IP = "192.168.26.91"  # Replace with your server's IP
+WIFI_SERVER_PORT = 3000 # Replace with your server's port
+AUDIO_FOLDER = "received_audio_files"  # Folder to save received audio
+CHUNK_SIZE = 40960  # Chunk size for audio data (for large audio packets)
+SENSOR_THRESHOLD_SIZE = 180  # Threshold size to differentiate sensor data from audio
+
+# Initialize pygame for audio playback
+pygame.mixer.init()
+
+# Ensure the audio folder exists
+if not os.path.exists(AUDIO_FOLDER):
+    os.makedirs(AUDIO_FOLDER)
+
+# Function to play the received audio file
+def play_audio(audio_files2):
+    try:
+        print(f"Playing audio file: {audio_files2}")
+        pygame.mixer.music.load(audio_files2)
+        pygame.mixer.music.play()
+        while pygame.mixer.music.get_busy():  # Wait until the audio finishes playing
+            time.sleep(1)
+    except Exception as e:
+        print(f"Failed to play audio: {e}")
+
+# Function to receive audio and sensor data
+def receive_via_wifi():
+    audio_file = os.path.join(AUDIO_FOLDER, "received_audio.wav")
+    is_receiving_audio = False
+    buffer = b""  # Buffer to accumulate data fragments
+    max_buffer_size = 100 * 1024 * 1024  # Set a max buffer size (100MB for example, adjust as needed)
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+            server.bind((WIFI_SERVER_IP, WIFI_SERVER_PORT))
+            server.listen(1)
+            #print(f"Listening on {WIFI_SERVER_IP}:{WIFI_SERVER_PORT}...")
+            print(f"Initialized")
+            conn, addr = server.accept()
+            with conn:
+                print(f"LoRa initialized successfully")
+                while True:
+                    data = conn.recv(CHUNK_SIZE)
+                    if not data:
+                        break
+                   
+                    # Accumulate received data into the buffer
+                    buffer += data
+
+                    # If buffer size exceeds the max limit, prevent it from growing infinitely
+                    if len(buffer) > max_buffer_size:
+                        print("Buffer size exceeded the limit, stopping reception.")
+                        buffer = buffer[:max_buffer_size]
+
+                    while buffer:
+                        # Check if we are receiving audio data
+                        if is_receiving_audio:
+                            # Look for the "AUDIO_COMPLETED" marker anywhere in the buffer
+                            completed_idx = buffer.find(b"AUDIO_COMPLETED")
+                            if completed_idx != -1:
+                                is_receiving_audio = False
+                                #print(f"Audio transmission completed.")
+                               
+                                # Write the entire buffer to the file once AUDIO_COMPLETED is received
+                                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                current_audio_file = os.path.join(AUDIO_FOLDER, f"audio_{timestamp}.wav")
+                                with open(current_audio_file, "wb") as f:
+                                    f.write(buffer[:completed_idx])  # Write the audio data, excluding the "AUDIO_COMPLETED"
+                                    #print(f"Audio file written with {len(buffer[:completed_idx])} bytes.")
+                                
+                                print(f"Audio transmission completed.")
+                                print(f"Audio file written with {len(buffer[:completed_idx])} bytes.")
+                                buffer = buffer[completed_idx + len(b"AUDIO_COMPLETED"):]  # Clear the buffer after writing
+                                play_audio(current_audio_file)
+                            else:
+                                print(f"Audio is arriving") 
+                                break  # Wait for more data if "AUDIO_COMPLETED" is not found
+                       
+                        else:
+                            # Process commands outside audio mode
+                            if buffer.startswith(b"AUDIO_START"):
+                                is_receiving_audio = True
+                                open(audio_file, "wb").close()  # Start a new audio file
+                                buffer = buffer[len(b"AUDIO_START"):]  # Remove "AUDIO_START"
+                                print("Started receiving audio data.")
+                            elif buffer.startswith(b"TEXT:"):
+                                end_idx = buffer.find(b"\n")  # Assume messages are newline-terminated
+                                if end_idx == -1:
+                                    break  # Wait for more data if newline is not found
+                                message = buffer[5:end_idx].decode('utf-8')  # Strip "TEXT:" prefix
+                                print(f"Received message: {message}")
+                                buffer = buffer[end_idx + 1:]  # Remove processed message
+                            else:
+                                 print("Unknown data format received.")
+                                 buffer = b""  # Clear the buffer to avoid stuck state
+                    time.sleep(0.1)  # Add a small delay to prevent tight loop
+    except Exception as e:
+        print(f"Lora not initialized")
+
+def main():
+    while True:
+        # Receive data via Wi-Fi and process it
+        receive_via_wifi()
+        time.sleep(2)  # Wait for a moment before checking again
+
+if __name__ == "__main__":
+    main()
